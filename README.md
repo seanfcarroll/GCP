@@ -1,16 +1,189 @@
 # GCP
 
-## GCP Design
+## Networking
+
+### Images
+
+#### GCP Multi VPC
+
+![GCP Multi VPC](./images/gcp-multi-vpc.png)
+
+#### GCP VPC Load Balancing
+
+![GCP VPC Load Balancing](./images/gcp-vpc-loadbalancer-armor.png)
+
+---
+
+### VPC Networking Fundamentals
+
+- **_A VPC network consists of subnets, routes and firewall rules_**
+- **VPC Network CIDR can be as large as /9 and doesn't require CIDR to be defined**
+- **Subnets** are regional, ie. spans across **Zones**, have a private RFC 1918 CIDR block of **/20** and a **gateway** which reserves **First IP address** of the CIDR block
+- **Routes** tell VM instances and the VPC network how to send traffic from an instance to destination. Without a VPC network there are no routes.
+- **Firewall** rules controls which packets are allowed to travel to which destinations
+  - Firewall rules are applied based on **priority**. Higher integer corresponds to lower priority.
+  - Each VPC network has 2 implied firewall rules: viz.
+    1. **ingress deny all**. Priority 65535
+    2. **egress allow all**. Priority 65535
+  - Default ingress in default vpc
+    1. **default-allow-{icmp,rdp,ssh}** from 0.0.0.0/0. Priority 65534
+    2. **default-allow-internal** tcp, udp, icmp within VPC CIDR. Priority 65534
+  - _RDP port 3389_
+- **Default Internet Gateway** ≡ 0.0.0.0/0
+- **External IP addresses** for instances are ephemeral and are released once a instance stops.
+- **Static External IP Address** are reserve addresses assigned to a project until released explicitly.
+- **SSH Connection** GCE generates SSH Key and stores it in:
+  - By Default, add the generated key to project or instance metadata
+  - If account is configured with **OS Login**, key is stored in user account
+  - Alternatively, keys can be created and added to **public ssh key metadata** of an instance
+- VPC network has internal DNS service. **An instance name can be used as internal DNS Name to access the instance other than internal IP address and external IP address**. `ping -c 3 mynet-eu-vm`
+- Deleting a VPC network order
+  1. Deletes firewall rules
+  2. Deletes Routes
+  3. Deletes Network
+- Auto-mode network create subnets in each region automatically while custom starts with no subnets
+- Access to instances with external ip addresses is only controlled by the ICMP firewall rules
+
+### Multiple VPC Networks
+
+- An instance can have **Multiple Network Interfaces (NIC)** based on instance type **(upto 8 NIC)** which enables connections to multiple VPC networks based on configuration
+- VMs with multiple network interface controllers (NICs) **can't(?) be part of subnets with overlapping CIDR**
+- **Internal DNS query** for instance hostname **resolves to the primary interface (nic0)** of the instance
+- NICs get route to for the subnet it is in. In addition, the instance gets a single default route that is associated with the primary interface eth0.
+- Unless manually configured otherwise, any traffic leaving an instance for any destination other than a directly connected subnet will leave the instance via the default route on eth0.
+
+### VPC Networks - Controlling Access
+
+- Instance Creation: Networks use network tags to identify which VM instances are subject to certain firewall rules and network routes. Later in this lab, you create a firewall rule to allow HTTP access for VM instances with the web-server tag. Alternatively, you could check the Allow HTTP traffic checkbox, which would tag this instance as http-server and create the tagged firewall rule for tcp:80 for you.
+- VM get default service account [PROJECT_NUMBER]-compute@developer.gserviceaccount.com.
+  - 2 type of Service Accounts:
+    1. User-managed service accounts
+    2. Google-managed service accounts ([PROJECT_NUMBER]-compute@developer.gserviceaccount.com) with Cloud IAM project editor role.
+  - VM's Default Service Account doesn't have Network Admin Role and thus can't affect firewall and SSL certificates
+- To activate a service account: Create a service account -> Assign role eg. Compute Security Admin -> Create Key -> Download json and rename to credentials.json -> `gcloud auth activate-service-account --key-file credentials.json`
+
+#### IAM
+
+- Network Admin: Permissions to create, modify, and delete networking resources, except for firewall rules and SSL certificates. Provide listing of firewall resources
+- Security Admin: Permissions to create, modify, and delete firewall rules and SSL certificates
+
+### HTTP Load Balancer with Cloud Armor
+
+- Use `siege` to stress test network load balancing
+- GCP implements **HTTP(S) Loadbalancers** at edge location aka. point of presence **(POP)**
+- **Cloud Armor provides IP whitelisting/blacklisting** to filter traffic to LBs.
+- **Healthcheck probes** to loadbalanced instances comes from **130.211.0.0/22 and 35.191.0.0/16**
+- **Managed Instance Groups** uses **Instance Templates** to create group of identical instances
+- **Instance Groups** aws-aka. **AutoScaling Groups** use instance templates to to launch identical VMs based on load. They can be **created for a region or zone**
+- **_startup-script-url_** awk-aka. **_user-data_**
+- **_The Hostname and Server Location identifies where the HTTP Load Balancer sends traffic_**
+
+---
+
+## Useful Commands
+
+Command structure `gcloud service [subservice(s)] action [name] --options`. subservices are mentioned in plural form
+
+```sh
+# get help
+gcloud help compute instances create
+
+# setup gcloud
+gcloud init
+gcloud init --project qwiklabs-gcp-00-190ccec93406
+
+# active account name
+gcloud auth list
+
+# list the project ID
+gcloud config list project
+
+# Project Quota
+gcloud compute project-info describe --project <project-id>
+
+# check whether the server is ready for an RDP connection
+
+# create a custom vpc network
+gcloud compute --project=qwiklabs-gcp-00-cf97919dc2f9 networks create managementnet --subnet-mode=custom
+
+# create a subnet in custom mode vpc network, subnet is regional defined by a CIDR in a VPC
+gcloud compute networks subnets create managementsubnet-us --network=managementnet --region=us-central1 --range=10.130.0.0/20
+
+# Add firewall rules to network, a firewall rule for a network is defined as source, direction, action, rule, priority
+gcloud compute firewall-rules create managementnet-allow-icmp-ssh-rdp --direction=INGRESS --priority=1000 --network=managementnet --action=ALLOW --rules=tcp:22,tcp:3389,icmp --source-ranges=0.0.0.0/0
+
+# create an instance in a network, machine-type, zone and subnet is important
+gcloud compute instances create privatenet-us-vm --zone=us-central1-c --machine-type=n1-standard-1 --subnet=managementsubnet-us
+
+# list routes of an instance
+ip route
+
+# tag an instance
+gcloud compute instances add-tags blue --tags=web-server
+
+# create a firewall rule to target an instance
+gcloud compute firewall-rules create allow-http-web-server --allow=tcp:80,icmp --network default --priority 1000 --source-ranges 0.0.0.0/0 --direction INGRESS --target-tags web-server
+
+# create healthcheck firewall rules
+gcloud compute firewall-rules create default-allow-health-check --direction INGRESS --allow tcp --source-ranges=130.211.0.0/22,35.191.0.0/16 --target-tags http-server --network default
+
+# create an instance template
+gcloud compute instance-templates create us-east1-template --metadata startup-script-url=gs://cloud-training/gcpnet/httplb/startup.sh --network default --tags http-server
+
+# create an instance group
+gcloud compute instance-groups managed create us-east1-mig --template us-east1-template --size 1 --region us-east1
+
+# set autoscaling in instance group
+gcloud compute instance-groups managed set-autoscaling us-east1-mig --min-num-replicas 1 --max-num-replicas 5 --cool-down-period 45 --target-cpu-utilization 0.80
+
+# enable osLogin to an instance
+gcloud compute instances add-metadata instance-name --metadata enable-oslogin=TRUE
+
+# ssh osLogin to an instance
+gcloud compute ssh instance-name
+
+```
+
+---
+
+## Google Cloud Platform Fundamentals: Core Infrastructure
 
 ### Introduction
 
-- **GCP**: Compute + Storage + Networking + BigData + Machine Learning
+- **GCP**: Cloud based products and services = Infra + Platform + Software = Compute + Storage + Networking + BigData + Machine Learning = CSNBiM + G Suite + G Devices + Stackdriver, etc
 - **Cloud Computing**: On-Demand + Broad Network Access + Resource Pooling + Elasticity + Measured Services (_Pay per use_)
 - **History `<->` Future**: On Perm `->` Virtual `->` Serverless
 - **Compute**: (Managed Infra) `<-` Compute Engine (_IaaS_) `-` Kubernetes Engine (_Hybrid_) `-` App Engine (_PaaS_) `-` Cloud Functions (_Serverless_) `-` Managed Services (_Automated Elastic Resource_) `->` (Dynamic Infra)
+- Global -> Multi Region -> Region (_Each region separated by 160KM/100Miles_) -> Zones (_Think of them as separate facilities_)
 - Environmental Concerns - 0 Carbon Emission and 100% Renewable Energy
-- Encryption at Rest, In Transition, DDoS, Google Frontend Test for Vulnerablilities
+- Encryption at Rest, In Transition, DDoS, Google Frontend Test for Vulnerabilities
 - Built on **OpenAPIs** like kubernetes, Hadoop, Apache HBase which are opensource
+- Encryption at Rest, In Transition, DDoS, Google Frontend Test for Vulnerabilities
+- Project Number (_Auto-generated can't change_), Project ID _auto-generated, can be changed at time of creation only_, Project Name _user provided, NOT Globally unique_
+- Project in gshell can be changed by `gcloud config set project <PROJECT_ID>`, current project is set in `$DEVSHELL_PROJECT_ID` `env` variable
+  - `gcloud config list`
+  - `gcloud config core list`
+
+### Cloud Platform Hierarchy
+
+- Compute Resources, IAM, least privilige, raw compute to managed services, access using web console/cli-tools(_G Cloud SDK preinstalled, gsutil, bq, gcloud_)/iOS/Android/APIs
+- Resources are allocated based on **PROJECTS** which can be grouped under **FOLDERS**
+- Organization Nodes -> Folders (_It is must to have org node to create folders_) -> Projects -> GCP Resources
+  - Policies are inherited from top (eg. Org node), with more generous of them taking precedence (_consider it binary OR of access level_)
+  - Org node can be create by using Cloud Identity
+  - [?] _Billing is per project basis_
+
+### IAM
+
+- who (_person|group|application_) -> can do what (_previliges|actions_)-> on which resources (_GCP Services_)?
+- Organization -= Folders -= Projects -= Members -= Roles -= Resources -= Products -= G Suit Super Admins
+- Policy is set on resource comprises of **Roles and Role Members**
+- Policies|Permission are **inherited top to down and is union of all policies** in the hierarchy with **less restrictive policy overriding restrictive policy**
+- - _Follow principle of least privilege_
+
+---
+
+## Must Review
 
 ### Physical Infrastructure
 
@@ -30,14 +203,14 @@ Global System (_Internet_) `->` Points of Presence (_Edge Locations and CDNs_)
   - Policies are inherited from top (eg. Org node), with more generous of them taking precedence (_consider it binary OR of access level_)
   - Org node can be create by using Cloud Identity
   - Billing is per project basis
-- Compute Resources, IAM, least privilige, raw compute to managed services, access using web console/cli-tools/iOS/Android/APIs
+- Compute Resources, IAM, least privilege, raw compute to managed services, access using web console/cli-tools/iOS/Android/APIs
 - Resources are allocated based on **PROJECTS** which can be grouped under **FOLDERS**
 
 ### Network Ingress and Egress
 
 - **Normal Network**: Routes via internet to edge location _closets to destination_, available at _lower price_
 - **Google**: Routes so traffic enters from @edge _closest to source_
-  - Single global IP address and loadbalance worldwide
+  - Single global IP address and Loadbalancers worldwide
   - _AWS only supports Normal network_
 
 ### Pricing
@@ -45,20 +218,15 @@ Global System (_Internet_) `->` Points of Presence (_Edge Locations and CDNs_)
 - **Network Traffic**: Ingress Free, Egress charged per GB
   - _egress to a gcp service in a region is sometimes free_
 - **Services**: Usage, Provisioned
-- **Discounts**: Pay by second, Sustained Use discount, Cutomize compute resources or use out of box
+- **Discounts**: Pay by second, Sustained Use discount, Customize compute resources or use out of box
 
 ### Security
 
-- Seperation of duties
-- Encryption at rest, in transition even within gcp network, DDoS, Google Frontend Test for Vulnerablilities
+- Separation of duties
+- Encryption at rest, in transition even within gcp network, DDoS, Google Frontend Test for Vulnerabilities
 - _Recommends: Distrust the network_
 
-## Useful commands
-
-```sh
-# Project Quota
-gcloud compute project-info describe --project <project-id>
-```
+---
 
 ## Resources
 
@@ -213,7 +381,6 @@ gcloud compute project-info describe --project <project-id>
 - [Nginx | Marketplace - Google Cloud Platform](https://console.cloud.google.com/marketplace/details/click-to-deploy-images/nginx)
 - [NGINX Plus | Marketplace - Google Cloud Platform](https://console.cloud.google.com/marketplace/details/nginx-public/nginx-plus)
 - [Using OAuth 2.0 for Server to Server Applications Google Identity Platform Google Developers](https://developers.google.com/identity/protocols/OAuth2ServiceAccount)
--
 - [My Coke Rewards Case Study](https://developers.googleblog.com/2017/09/how-machine-learning-with-tensorflow.html)
 - [Google Domains](https://domains.google/#/)
 - [Google's Tools](https://en.wikipedia.org/wiki/Google_Data_Centers#Software)
@@ -239,6 +406,14 @@ gcloud compute project-info describe --project <project-id>
 - [GCP YouTube Channel](https://www.youtube.com/user/googlecloudplatform)
 - [Data Center Tour #1](https://www.youtube.com/watch?v=XZmGGAbHqa0)
 - [Data Center Tour #2 (360 Degree)](https://www.youtube.com/watch?v=zDAYZU4A3w0)
+- [White Papers](https://cloud.google.com/whitepapers/)
+- [Sample Case Study](https://cloud.google.com/certification/guides/cloud-architect/#sample-case-study)
+- [SRE Book](https://landing.google.com/sre/book/index.html), Loadbalancing, Data Processing Pipelines, MTTR (mean time to repair), MTBF (mean time between failure) - Testing for reliability - Release Engineering
+- [Cloud Architect Certification Guide](https://cloud.google.com/certification/guides/cloud-architect/)
+- [Loadbalancing](https://cloud.google.com/compute/docs/load-balancing/internal/)
+- [Cloud Identity](https://support.google.com/cloudidentity/answer/7319251?hl=en&ref_topic=7385935)
+- [Data Transfer](https://cloud.google.com/products/data-transfer/)
+- [GCSFuse](https://github.com/GoogleCloudPlatform/gcsfuse)
 
 ## Script to fetch Resources list from acg
 
